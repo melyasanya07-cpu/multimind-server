@@ -10,17 +10,6 @@ const PORT = process.env.PORT || 3000;
 function envProviderDefs() {
   const defs = [];
 
-  if (process.env.OPENAI_API_KEY) {
-    defs.push({
-      id: "openai",
-      name: "OpenAI",
-      type: "openai-responses",
-      key: process.env.OPENAI_API_KEY,
-      model: process.env.OPENAI_MODEL || "gpt-5.6-terra",
-      base: "https://api.openai.com/v1"
-    });
-  }
-
   if (process.env.GEMINI_API_KEY) {
     defs.push({
       id: "gemini",
@@ -32,27 +21,15 @@ function envProviderDefs() {
     });
   }
 
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (process.env.MISTRAL_API_KEY) {
     defs.push({
-      id: "anthropic",
-      name: "Claude",
-      type: "anthropic",
-      key: process.env.ANTHROPIC_API_KEY,
-      model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
-      base: "https://api.anthropic.com/v1"
+      id: "mistral",
+      name: "Mistral AI",
+      type: "openai-chat",
+      key: process.env.MISTRAL_API_KEY,
+      model: process.env.MISTRAL_MODEL || "mistral-large-2512",
+      base: "https://api.mistral.ai/v1"
     });
-  }
-
-  // Add any OpenAI-compatible provider without changing code:
-  // PROVIDERS_JSON=[{"id":"x","name":"My AI","type":"openai-chat","base":"https://.../v1","keyEnv":"MY_KEY","model":"model-id"}]
-  try {
-    const extra = JSON.parse(process.env.PROVIDERS_JSON || "[]");
-    for (const p of extra) {
-      const key = p.keyEnv ? process.env[p.keyEnv] : "";
-      if (key && p.base && p.model) defs.push({ ...p, key });
-    }
-  } catch (e) {
-    console.error("Bad PROVIDERS_JSON:", e.message);
   }
 
   return defs;
@@ -65,51 +42,12 @@ function publicProviders() {
 }
 
 async function callProvider(p, system, prompt) {
-  if (p.type === "openai-responses") {
-    const r = await fetch(`${p.base}/responses`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${p.key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: p.model,
-        instructions: system,
-        input: prompt
-      })
-    });
-    const j = await safeJson(r);
-    if (!r.ok) throw new Error(`${p.name}: ${errorText(j)}`);
-    return extractOpenAIResponse(j);
-  }
-
-  if (p.type === "anthropic") {
-    const r = await fetch(`${p.base}/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": p.key,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: p.model,
-        max_tokens: 5000,
-        system,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-    const j = await safeJson(r);
-    if (!r.ok) throw new Error(`${p.name}: ${errorText(j)}`);
-    return (j.content || []).filter(x => x.type === "text").map(x => x.text).join("\n");
-  }
-
-  // Generic OpenAI-compatible Chat Completions provider (Gemini included).
   const r = await fetch(`${p.base.replace(/\/$/,"")}/chat/completions`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${p.key}`,
       "Content-Type": "application/json",
-      ...(p.id === "gemini" ? {"x-goog-api-client":"multimind/1.0.0"} : {})
+      ...(p.id === "gemini" ? {"x-goog-api-client":"multimind/1.1.0"} : {})
     },
     body: JSON.stringify({
       model: p.model,
@@ -119,27 +57,25 @@ async function callProvider(p, system, prompt) {
       ]
     })
   });
+
   const j = await safeJson(r);
   if (!r.ok) throw new Error(`${p.name}: ${errorText(j)}`);
-  return j?.choices?.[0]?.message?.content || "";
+
+  const content = j?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(x => typeof x === "string" ? x : (x?.text || "")).join("\n");
+  }
+  return "";
 }
 
 async function safeJson(r) {
   const text = await r.text();
   try { return JSON.parse(text); } catch { return { raw: text }; }
 }
+
 function errorText(j) {
   return j?.error?.message || j?.message || j?.raw || "Unknown provider error";
-}
-function extractOpenAIResponse(j) {
-  if (j.output_text) return j.output_text;
-  const out = [];
-  for (const item of (j.output || [])) {
-    for (const c of (item.content || [])) {
-      if (c.type === "output_text" && c.text) out.push(c.text);
-    }
-  }
-  return out.join("\n");
 }
 
 const rolePrompt = `You are one expert in a multi-AI council.
@@ -210,7 +146,7 @@ app.get("/api/health", (req,res) => {
   res.json({
     ok: true,
     service: "MultiMind",
-    version: "1.0.0",
+    version: "1.1.0",
     providers: ps.length ? ps.map(p=>`${p.name}: ${p.model}`).join(", ") : "none"
   });
 });
@@ -228,7 +164,7 @@ app.post("/api/chat", async (req,res) => {
 
     const providers = envProviderDefs();
     if (!providers.length) return res.status(503).json({
-      error:"No AI providers configured. Add OPENAI_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY on the server."
+      error:"No AI providers configured. Add GEMINI_API_KEY and/or MISTRAL_API_KEY on the server."
     });
 
     const task = project
@@ -255,7 +191,7 @@ app.post("/api/chat", async (req,res) => {
     }
 
     if (mode === "council") {
-      const members = providers.slice(0, Math.min(4, providers.length));
+      const members = providers.slice(0, Math.min(2, providers.length));
       const drafts = await parallelDrafts(members, task);
       const judge = providers[0];
       const answer = await callProvider(judge,
@@ -269,7 +205,7 @@ app.post("/api/chat", async (req,res) => {
     }
 
     if (mode === "debate") {
-      const members = providers.slice(0, Math.min(4, providers.length));
+      const members = providers.slice(0, Math.min(2, providers.length));
       const drafts = await parallelDrafts(members, task);
       const reviewer = providers[1] || providers[0];
       const improved = await callProvider(reviewer,
