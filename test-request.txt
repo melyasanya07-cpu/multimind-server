@@ -1,0 +1,8 @@
+POST /api/chat
+Content-Type: application/json
+
+{
+  "message": "Напиши функцию Java для сортировки списка строк.",
+  "mode": "council",
+  "project": "Test"
+}
