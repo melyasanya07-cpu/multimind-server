@@ -14,10 +14,10 @@ function envProviderDefs() {
     defs.push({
       id: "gemini",
       name: "Google Gemini",
-      type: "openai-chat",
+      type: "gemini-native",
       key: process.env.GEMINI_API_KEY,
       model: process.env.GEMINI_MODEL || "gemini-3.8-flash",
-      base: "https://generativelanguage.googleapis.com/v1beta/openai"
+      base: "https://generativelanguage.googleapis.com/v1beta"
     });
   }
 
@@ -42,12 +42,35 @@ function publicProviders() {
 }
 
 async function callProvider(p, system, prompt) {
+  if (p.type === "gemini-native") {
+    const r = await fetch(`${p.base}/models/${encodeURIComponent(p.model)}:generateContent`, {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": p.key,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      })
+    });
+
+    const j = await safeJson(r);
+    if (!r.ok) throw new Error(`${p.name}: ${errorText(j, r.status)}`);
+
+    const text = (j?.candidates?.[0]?.content?.parts || [])
+      .map(x => x?.text || "")
+      .join("\n")
+      .trim();
+    if (!text) throw new Error(`${p.name}: empty response`);
+    return text;
+  }
+
   const r = await fetch(`${p.base.replace(/\/$/,"")}/chat/completions`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${p.key}`,
-      "Content-Type": "application/json",
-      ...(p.id === "gemini" ? {"x-goog-api-client":"multimind/1.1.0"} : {})
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       model: p.model,
@@ -59,14 +82,15 @@ async function callProvider(p, system, prompt) {
   });
 
   const j = await safeJson(r);
-  if (!r.ok) throw new Error(`${p.name}: ${errorText(j)}`);
+  if (!r.ok) throw new Error(`${p.name}: ${errorText(j, r.status)}`);
 
   const content = j?.choices?.[0]?.message?.content;
-  if (typeof content === "string") return content;
+  if (typeof content === "string" && content.trim()) return content;
   if (Array.isArray(content)) {
-    return content.map(x => typeof x === "string" ? x : (x?.text || "")).join("\n");
+    const text = content.map(x => typeof x === "string" ? x : (x?.text || "")).join("\n").trim();
+    if (text) return text;
   }
-  return "";
+  throw new Error(`${p.name}: empty response`);
 }
 
 async function safeJson(r) {
@@ -74,8 +98,9 @@ async function safeJson(r) {
   try { return JSON.parse(text); } catch { return { raw: text }; }
 }
 
-function errorText(j) {
-  return j?.error?.message || j?.message || j?.raw || "Unknown provider error";
+function errorText(j, status) {
+  const nested = j?.error;
+  return nested?.message || nested?.status || j?.message || j?.detail || j?.raw || `HTTP ${status}`;
 }
 
 const rolePrompt = `You are one expert in a multi-AI council.
@@ -118,7 +143,7 @@ function debatePrompt(task, drafts) {
 ${task}
 
 Here are proposed solutions:
-${drafts.map((d,i)=>`\n[${d.provider}]\n${d.text}`).join("\n")}
+${drafts.map(d=>`\n[${d.provider}]\n${d.text}`).join("\n")}
 
 Identify important disagreements and technical errors, then write a superior corrected solution.
 Do not expose private reasoning. Return only useful review conclusions and improved answer.`;
@@ -146,7 +171,7 @@ app.get("/api/health", (req,res) => {
   res.json({
     ok: true,
     service: "MultiMind",
-    version: "1.1.0",
+    version: "1.1.1",
     providers: ps.length ? ps.map(p=>`${p.name}: ${p.model}`).join(", ") : "none"
   });
 });
